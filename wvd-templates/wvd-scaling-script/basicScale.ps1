@@ -43,13 +43,13 @@ $WeekDaysPeak = $Input.WeekDaysPeak  # Expected as a space-separated string, suc
 $ScaleUpDuringOffpeak = $Input.ScaleUpDuringOffPeak  # Expected "yes" or "no"
 
 # Set defaults if some of the parameters havent been passed on
-if ($WeekDaysPeak -eq $null) {
+if (!$WeekDaysPeak) {
     $WeekDaysPeak = "1 2 3 4 5"  # Defaults to Mon-Fri
 }
-if ($MinimumNumberOfRDSH -eq $null) {
+if (!$MinimumNumberOfRDSH) {
     $MinimumNumberOfRDSH = 0  # Defaults to 0
 }
-if ($PeakMinimumNumberOfRDSH -eq $null) {
+if (!$PeakMinimumNumberOfRDSH) {
     $PeakMinimumNumberOfRDSH = $MinimumNumberOfRDSH  # Defaults to the Offpeak minimum
 }
 $ScaleUpDuringOffpeak = ($ScaleUpDuringOffpeak -eq "yes")  # Defaults to $false
@@ -58,9 +58,9 @@ $ScaleUpDuringOffpeak = ($ScaleUpDuringOffpeak -eq "yes")  # Defaults to $false
 $WeekDaysPeakArray = $WeekDaysPeak -split " "
 
 # Control variables to prevent endless loops
-# Used mainly in loops waiting to start/stop VMs: 10 minutes waiting seems to be sufficient time
+# Used mainly in loops waiting to start/stop VMs: 5 minutes waiting seems to be sufficient time
 $StartStopWaitTime = 30  # seconds
-$StartStopMaxCycles = 20 # times to go through the waittime
+$StartStopMaxCycles = 10 # times to go through the waittime
 
 Set-ExecutionPolicy -ExecutionPolicy Undefined -Scope Process -Force -Confirm:$false
 Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope LocalMachine -Force -Confirm:$false
@@ -100,7 +100,7 @@ function Add-LogEntry
         $TimeDifferenceInHours
     )
 
-    if ($LogAnalyticsWorkspaceId -ne $null) {
+    if ($LogAnalyticsWorkspaceId) {
 
         foreach ($Key in $LogMessage.Keys) {
             switch ($Key.substring($Key.Length - 2)) {
@@ -155,7 +155,7 @@ $Connection = Get-AutomationConnection -Name $ConnectionAssetName
 # Authenticating to Azure
 Clear-AzContext -Force
 $AZAuthentication = Connect-AzAccount -ApplicationId $Connection.ApplicationId -TenantId $AADTenantId -CertificateThumbprint $Connection.CertificateThumbprint -ServicePrincipal
-if ($AZAuthentication -eq $null) {
+if (!$AZAuthentication) {
     Send-Message -Message "Failed to authenticate Azure: $($_.exception.message)" -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
     exit
 } else {
@@ -165,7 +165,7 @@ if ($AZAuthentication -eq $null) {
 }
 # Set the Azure context with Subscription
 $AzContext = Set-AzContext -SubscriptionId $SubscriptionID
-if ($AzContext -eq $null) {
+if (!$AzContext) {
     Write-Error "Please provide a valid subscription"
     exit
 } else {
@@ -211,7 +211,7 @@ function UpdateLoadBalancerTypeInPeakandOffPeakwithBredthFirst {
 }
 
 # Function to Check if the session host is allowing new connections, and enable it of not
-function Check-ForAllowNewConnections
+function Set-AllowNewSession
 {
     param(
         [string]$TenantName,
@@ -264,7 +264,7 @@ function Stop-SessionHost
 }
 
 # Function to check if the Session host is available
-function Check-IfSessionHostIsAvailable
+function Wait-SessionHostAvailable
 {
     param(
         [string]$TenantName,
@@ -307,7 +307,7 @@ if ($EndPeakDateTime -lt $BeginPeakDateTime) {
 
 # Checking given host pool name exists in Tenant
 $HostpoolInfo = Get-RdsHostPool -TenantName $TenantName -Name $HostpoolName
-if ($HostpoolInfo -eq $null) {
+if (!$HostpoolInfo) {
     $Message = "Hostpoolname '$HostpoolName' does not exist in the tenant of '$TenantName'. Ensure that you have entered the correct values."
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
     exit
@@ -328,7 +328,7 @@ $HostpoolInfo = Get-RdsHostPool -TenantName $TenantName -Name $HostPoolName
 
 # Check if the hostpool have session hosts
 $ListOfSessionHosts = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -ErrorAction Stop | Sort-Object SessionHostName
-if ($ListOfSessionHosts -eq $null) {
+if (!$ListOfSessionHosts) {
     $Message = "Session hosts does not exist in the Hostpool of '$HostpoolName'. Ensure that hostpool have hosts or not?."
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
     exit
@@ -411,7 +411,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                     $SessionHostInfo = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHost
                     if ($RoleInstance.PowerState -ne "VM running" -and $SessionHostInfo.UpdateState -eq "Succeeded") {
                         # Enable new connections for this host (the scale down process might have set the session host in drain mode)
-                        Check-ForAllowNewConnections -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHost
+                        Set-AllowNewSession -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHost
                         # Start the Az VM
                         $Message = "Starting Azure VM: $VMName and waiting for it to complete."
                         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -427,7 +427,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                             }
                         }
                         # Wait for the VM to become available to WVD
-                        $SessionHostIsAvailable = Check-IfSessionHostIsAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost
+                        $SessionHostIsAvailable = Wait-SessionHostAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost
                         if ($SessionHostIsAvailable) {
                             $Message = "'$SessionHost' session host status is 'Available'"
                             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -473,7 +473,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                         $SessionHostInfo = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHost
                         if ($RoleInstance.PowerState -ne "VM running" -and $SessionHostInfo.UpdateState -eq "Succeeded") {
                             # Validating session host is allowing new connections
-                            Check-ForAllowNewConnections -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHost
+                            Set-AllowNewSession -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHost
                             # Start the Az VM
                             $Message = "Starting Azure VM: $VMName and waiting for it to complete."
                             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -488,7 +488,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                                 }
                             }
-                            $SessionHostIsAvailable = Check-IfSessionHostIsAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost
+                            $SessionHostIsAvailable = Wait-SessionHostAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost
                             if ($SessionHostIsAvailable) {
                                 $Message = "'$SessionHost' session host status is 'Available'"
                                 Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -525,34 +525,36 @@ else
     ##############################################
     $Message = "It is Off-peak hours"
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
-    $Message = "Starting to scale down WVD session hosts."
+    $Message = "Verifying whether we need to scale down the number of WVD session hosts."
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
     $Message = "Processing hostpool $($HostpoolName)"
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
        
-    # Check if minimum number of rdsh VM's are running and available
-    $CheckMinimumNumberOfRDShIsRunning = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName | Where-Object { $_.Status -eq "Available" }
-    if ($CheckMinimumNumberOfRDShIsRunning -eq $null) {
-        $NumberOfRunningHost = 0
-    } else {
-        $NumberOfRunningHost = $CheckMinimumNumberOfRDShIsRunning.Length
-    }
-
     # Check the number of running session hosts
     [int]$NumberOfRunningHost = 0
     # Total number of running cores
     [int]$TotalRunningCores = 0
     #Initialize variable for to skip the session host which is in maintenance.
     $SkipSessionhosts = @()
-    
+
+    # Check if the minimum number of rdsh VM's are running and available
+    $CheckMinimumNumberOfRDShIsRunning = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName | Where-Object { $_.Status -eq "Available" }
+    if (!$CheckMinimumNumberOfRDShIsRunning) {
+        $NumberOfRunningHost = 0
+    } else {
+        $NumberOfRunningHost = $CheckMinimumNumberOfRDShIsRunning.Length
+    }
+
+  
     # Total list of hosts (running and not running)
-    $ListOfSessionHost = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName
+    $ListOfSessionHosts = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName
 
     # See if we need to add session hosts
     if ($NumberOfRunningHost -lt $MinimumNumberOfRDSH) {
-        $Message = "There are too few session hosts in this pool ($NumberOfRunningHosts), starting hosts to reach the minimum ($MinimumNumberOfRDSH hosts)"
+        $Message = "There are too few session hosts in this pool ($NumberOfRunningHost), starting hosts to reach the minimum ($MinimumNumberOfRDSH hosts)"
         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
         foreach ($SessionHostName in $ListOfSessionHosts.SessionHostName) {
+            # Loop through the VMs until we reach the minimum number of hosts
             if ($NumberOfRunningHost -lt $MinimumNumberOfRDSH) {
                 $VMName = $SessionHostName.Split(".")[0]
                 $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
@@ -561,7 +563,7 @@ else
                     continue
                 }
                 # Check if the session host is allowing new connections, and enable it
-                Check-ForAllowNewConnections -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHostName
+                Set-AllowNewSession -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHostName
                 Start-SessionHost -VMName $VMName
                 # Wait for the VM to Start
                 $IsVMStarted = $false
@@ -572,19 +574,20 @@ else
                     }
                 }
                 # Wait for the VM to start
-                $SessionHostIsAvailable = Check-IfSessionHostIsAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost
+                $SessionHostIsAvailable = Wait-SessionHostAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost
                 if ($SessionHostIsAvailable) {
-                    $Message = "'$SessionHost' session host status is 'Available'"
+                    $NumberOfRunningHost += 1
+                    $Message = "'$SessionHost' session host status is now 'Available'"
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                 }
                 else {
-                    $Message = "'$SessionHost' session host does not configured properly with deployagent or does not started properly"
+                    $Message = "Session host '$SessionHost' has not started properly. Maybe it is not configured properly with the deploy agent?"
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                 }
             }
         }
     } else {
-        if ($NumberOfRunningHost -eq $null) {
+        if (!$NumberOfRunningHost) {
             $NumberOfRunningHost = 0
         }
         $Message = "This pool has $NumberOfRunningHost hosts running, (the minimum is $MinimumNumberOfRDSH): no need to scale up"
@@ -783,7 +786,7 @@ else
                             if ($SessionHostInfo.AllowNewSession -eq $false) {
                                 $Message = "Setting AllowNewConnections to true for session host $SessionHostName"
                                 Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
-                                Check-ForAllowNewConnections -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHostName
+                                Set-AllowNewSession -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHostName
                             }
                         } else {
                             Start-Sleep -Seconds $StartStopWaitTime
@@ -859,7 +862,7 @@ else
                     $Message = "Existing number of sessions too close to the maximum session limit, starting VM $VMName..."
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                     # Validating session host is allowing new connections
-                    Check-ForAllowNewConnections -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHost.SessionHostName
+                    Set-AllowNewSession -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHost.SessionHostName
                     # Start the Az VM
                     $Message = "Starting Azure VM: $VMName and waiting for it to complete."
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -876,7 +879,7 @@ else
                     }
 
                     # Wait for the sessionhost is available
-                    $SessionHostIsAvailable = Check-IfSessionHostIsAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost.SessionHostName
+                    $SessionHostIsAvailable = Wait-SessionHostAvailable -TenantName $TenantName -HostPoolName $HostpoolName -SessionHost $SessionHost.SessionHostName
                     if ($SessionHostIsAvailable) {
                         $Message = "$($SessionHost.SessionHostName | Out-String) session host status is 'Available'"
                         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -891,7 +894,7 @@ else
                     # Increment the number of minimumnumberofrdsh and store it in an Azure Automation variable for the next time we run
                     [int]$MinimumNumberOfRDSH = [int]$MinimumNumberOfRDSH + 1
                     $OffPeakUsageMinimumNoOfRDSH = Get-AzAutomationVariable -Name "$HostpoolName-OffPeakUsage-MinimumNoOfRDSH" -ResourceGroupName $AutomationAccount.ResourceGroupName -AutomationAccountName $AutomationAccount.AutomationAccountName -ErrorAction SilentlyContinue
-                    if ($OffPeakUsageMinimumNoOfRDSH -eq $null) {
+                    if (!$OffPeakUsageMinimumNoOfRDSH) {
                         New-AzAutomationVariable -Name "$HostpoolName-OffPeakUsage-MinimumNoOfRDSH" -ResourceGroupName $AutomationAccount.ResourceGroupName -AutomationAccountName $AutomationAccount.AutomationAccountName -Encrypted $false -Value $MinimumNumberOfRDSH -Description "Dynamically generated minimumnumber of RDSH value"
                     } else {
                         Set-AzAutomationVariable -Name "$HostpoolName-OffPeakUsage-MinimumNoOfRDSH" -ResourceGroupName $AutomationAccount.ResourceGroupName -AutomationAccountName $AutomationAccount.AutomationAccountName -Encrypted $false -Value $MinimumNumberOfRDSH

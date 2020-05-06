@@ -657,7 +657,7 @@ else
                     $Message = "Session $($session.SessionId) from user $($session.UserPrincipalName) and state $($session.SessionState) is connected to session host $($session.SessionHostName), although that VM is powered off!"
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                     # Uncomment next line to invoke the session logoff
-                    # Invoke-RdsUserSessionLogoff -TenantName $TenantName -HostPoolName $HostPoolName -SessionHostName $session.SessionHostName -SessionId $session.SessionId -Force
+                    # Invoke-RdsUserSessionLogoff -TenantName $TenantName -HostPoolName $HostPoolName -SessionHostName $session.SessionHostName -SessionId $session.SessionId -Force -NoUserPrompt
                 }
             }
         }

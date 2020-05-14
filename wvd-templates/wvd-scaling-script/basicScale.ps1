@@ -422,12 +422,12 @@ if (($CurrentDateTime -ge $BeginPeakDateTime) -and ($CurrentDateTime -le $EndPea
     # PeakMinimumNuberOfRDSH was set and we need more hosts
     if ($NumberOfRunningHost -lt $PeakMinimumNumberOfRDSH) {
 
-        $Message = "Current number of running session hosts ($NumberOfRunningHost) is less than minimum requirements for peak hours ($PeakMinimumNumberOfRDSH), starting session host."
-        Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
-        # Start VM to meet the minimum requirement            
+        # Start VMs to meet the requirement for minimum number of session hosts
         foreach ($SessionHost in $AllSessionHosts.SessionHostName) {
             # Check whether the number of running VMs now meets the minimum or not
             if ($NumberOfRunningHost -lt $PeakMinimumNumberOfRDSH) {
+                $Message = "Current number of running session hosts ($NumberOfRunningHost) is less than minimum requirements for peak hours ($PeakMinimumNumberOfRDSH), starting session host."
+                Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                 $VMName = $SessionHost.Split(".")[0]
                 $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
                 if ($SessionHost.ToLower().Contains($RoleInstance.Name.ToLower())) {
@@ -465,9 +465,6 @@ if (($CurrentDateTime -ge $BeginPeakDateTime) -and ($CurrentDateTime -le $EndPea
                         $AvailableSessionCapacity = $AvailableSessionCapacity + $RoleSize.NumberOfCores * $SessionThresholdPerCPU
                         [int]$NumberOfRunningHost = [int]$NumberOfRunningHost + 1
                         [int]$TotalRunningCores = [int]$TotalRunningCores + $RoleSize.NumberOfCores
-                        if ($NumberOfRunningHost -ge $MinimumNumberOfRDSH) {
-                            break;
-                        }
                     }
                 }
             }
@@ -657,7 +654,7 @@ else
                     $Message = "Session $($session.SessionId) from user $($session.UserPrincipalName) and state $($session.SessionState) is connected to session host $($session.SessionHostName), although that VM is powered off!"
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                     # Uncomment next line to invoke the session logoff
-                    # Invoke-RdsUserSessionLogoff -TenantName $TenantName -HostPoolName $HostPoolName -SessionHostName $session.SessionHostName -SessionId $session.SessionId -Force -NoUserPrompt
+                    Invoke-RdsUserSessionLogoff -TenantName $TenantName -HostPoolName $HostPoolName -SessionHostName $session.SessionHostName -SessionId $session.SessionId -Force -NoUserPrompt
                 }
             }
         }

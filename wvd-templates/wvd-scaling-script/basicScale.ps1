@@ -41,6 +41,9 @@ $AutomationAccountName = $Input.AutomationAccountName
 $ConnectionAssetName = $Input.ConnectionAssetName
 $WeekDaysPeak = $Input.WeekDaysPeak  # Expected as a space-separated string, such as "1 2 3 4 5" (0=Sunday, 6=Saturday)
 $ScaleUpDuringOffpeak = $Input.ScaleUpDuringOffPeak  # Expected "yes" or "no"
+$BeginRampdownTime = $Input.BeginRampdownTime
+$RampdownUsersPerHost = $Input.RampdownUsersPerHost  # if connections < RampdownUsersPerHost, users are asked to logoff 
+$DryrunInput = $Input.Dryrun  # Expected "yes" or "no"
 
 # Set defaults if some of the parameters havent been passed on
 if (!$WeekDaysPeak) {
@@ -53,6 +56,7 @@ if (!$PeakMinimumNumberOfRDSH) {
     $PeakMinimumNumberOfRDSH = $MinimumNumberOfRDSH  # Defaults to the Offpeak minimum
 }
 $ScaleUpDuringOffpeak = ($ScaleUpDuringOffpeak -eq "yes")  # Defaults to $false
+$Dryrun = ($DryrunInput -eq "yes")  # Defaults to $false
 
 # Transform the string for week days into an array
 $WeekDaysPeakArray = $WeekDaysPeak -split " "
@@ -126,7 +130,7 @@ function Add-LogEntry
         }
     }
 }
-
+# Sends a message to a session
 function Send-Message {
     param(
         [string]$Message,
@@ -140,7 +144,12 @@ function Send-Message {
         $LogMessage = @{ hostpoolName_s = $HostpoolName; logmessage_s = "Failed to authenticate Azure: $($_.exception.message)" }
         Add-LogEntry -LogMessageObj $LogMessage -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey -logType "WVDTenantScale_CL" -TimeDifferenceInHours $TimeDifference        
     }
+}
 
+# Display message if running in Dryrun mode
+if ($Dryrun) {
+    $Message = "SCRIPT IN DRY-RUN MODE"
+    Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
 }
 
 # Display some the control variables
@@ -148,6 +157,15 @@ $Message = "Running with these control variables: 'MinimumNumberOfRDSH' = '$Mini
            'PeakMinimumNumberOfRDSH': '$PeakMinimumNumberOfRDSH', 'WeekDaysPeak': '$WeekDaysPeak', `
            'ScaleUpDuringOffpeak': '$ScaleUpDuringOffpeak' 'SessionThresholdPerCPU': '$SessionThresholdPerCPU'"
 Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+
+# Debugging message for rampdown variables
+$Rampdown = $False
+if ($BeginRampdownTime -and $RampdownUsersPerHost) {
+    $Message = "Running with rampdown enabled, rampdown phase beginning at $BeginRampdownTime hours for hosts with $RampdownUsersPerHost users or less"
+    Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+    $Rampdown = $True
+}
+
 
 # Collect the credentials from Azure Automation Account Assets
 $Connection = Get-AutomationConnection -Name $ConnectionAssetName
@@ -221,7 +239,9 @@ function Set-AllowNewSession
     # Check if the session host is allowing new connections
     $StateOftheSessionHost = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHostName
     if (!($StateOftheSessionHost.AllowNewSession)) {
-        Set-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHostName -AllowNewSession $true
+        if (!$Dryrun) {
+            Set-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHostName -AllowNewSession $true
+        }
     }
 }
 
@@ -235,7 +255,9 @@ function Start-SessionHost
         $TimeDifference
     )
     try {
-        Get-AzVM | Where-Object { $_.Name -eq $VMName } | Start-AzVM -AsJob | Out-Null
+        if (!$Dryrun) {
+            Get-AzVM | Where-Object { $_.Name -eq $VMName } | Start-AzVM -AsJob | Out-Null
+        }
     }
     catch {
         $Message = "Failed to start Azure VM: $($VMName) with error: $($_.exception.message)"
@@ -254,7 +276,9 @@ function Stop-SessionHost
         $TimeDifference
     )
     try {
-        Get-AzVM | Where-Object { $_.Name -eq $VMName } | Stop-AzVM -Force -AsJob | Out-Null
+        if (!$Dryrun) {
+            Get-AzVM | Where-Object { $_.Name -eq $VMName } | Stop-AzVM -Force -AsJob | Out-Null
+        }
     }
     catch {
         $Message = "Failed to stop Azure VM: $($VMName) with error: $($_.exception.message)"
@@ -299,6 +323,10 @@ if ($TenantGroupName -ne $CurrentTenantGroupName) {
 
 $BeginPeakDateTime = [datetime]::Parse($CurrentDateTime.ToShortDateString() + ' ' + $BeginPeakTime)
 $EndPeakDateTime = [datetime]::Parse($CurrentDateTime.ToShortDateString() + ' ' + $EndPeakTime)
+
+if ($Rampdown) {
+    $BeginRampdownDateTime = [datetime]::Parse($CurrentDateTime.ToShortDateString() + ' ' + $BeginRampdownTime)
+}
 
 # check the calculated end time is later than begin time in case of time zone
 if ($EndPeakDateTime -lt $BeginPeakDateTime) {
@@ -368,7 +396,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
         $VMName = $SessionHostName.Split(".")[0]
 
         # Check if VM is in maintenance (has been tagged with the $MaintenanceTagName, the value of the tag is not relevant)
-        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
+        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
         if ($RoleInstance.Tags.Keys -contains $MaintenanceTagName) {
             $Message = "Session host is in maintenance: $VMName, so script will skip this VM"
             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
@@ -377,7 +405,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
         }
         $AllSessionHosts = Compare-Object $ListOfSessionHosts $SkipSessionhosts | Where-Object { $_.SideIndicator -eq '<=' } | ForEach-Object { $_.InputObject }
 
-        $Message = "Checking session host $($SessionHost.SessionHostName): $($SessionHost.Sessions) and status: $($SessionHost.Status)"
+        $Message = "Checking session host $($SessionHost.SessionHostName) on VM $($RoleInstance.Name): $($SessionHost.Sessions) and status: $($SessionHost.Status)"
         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
 
         if ($SessionHostName.ToLower().Contains($RoleInstance.Name.ToLower())) {
@@ -388,7 +416,15 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                 $RoleSize = Get-AzVMSize -Location $RoleInstance.Location | Where-Object { $_.Name -eq $RoleInstance.HardwareProfile.VmSize }
                 $AvailableSessionCapacity = $AvailableSessionCapacity + $RoleSize.NumberOfCores * $SessionThresholdPerCPU
                 [int]$TotalRunningCores = [int]$TotalRunningCores + $RoleSize.NumberOfCores
+            } else {
+                # This should typically not happen
+                $Message = "VM $($RoleInstance.Name) not running, state is $($RoleInstance.PowerState)"
+                Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey        
             }
+        } else {
+            # This should typically not happen
+            $Message = "Could not match session host $($SessionHost.SessionHostName) to VM $($RoleInstance.Name)"
+            Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey        
         }
     }
 
@@ -400,13 +436,13 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
 
         $Message = "Current number of running session hosts ($NumberOfRunningHost) is less than minimum requirements for peak hours ($PeakMinimumNumberOfRDSH), starting session host."
         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
-        # Start VM to meet the minimum requirement            
+        # Start VM to meet the minimum requirement
         foreach ($SessionHost in $AllSessionHosts.SessionHostName) {
             # Check whether the number of running VMs now meets the minimum or not
-            if ($NumberOfRunningHost -lt $PeakMinimumNumberOfRDSH) {
+            if ($NumberOfRunningHost -lt $PeakMinimumNumberOfRDSH -and !$Dryrun) {
                 $VMName = $SessionHost.Split(".")[0]
-                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
-                if ($SessionHost.ToLower().Contains($RoleInstance.Name.ToLower())) {
+                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
+                if ($VMName.ToLower() -eq $RoleInstance.Name.ToLower()) {
                     # Check if the Azure VM is running and if the session host is healthy
                     $SessionHostInfo = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHost
                     if ($RoleInstance.PowerState -ne "VM running" -and $SessionHostInfo.UpdateState -eq "Succeeded") {
@@ -419,7 +455,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                         # Wait for the VM to Start
                         $IsVMStarted = $false
                         while (!$IsVMStarted) {
-                            $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name -eq $VMName }
+                            $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
                             if ($RoleInstance.PowerState -eq "VM running") {
                                 $IsVMStarted = $true
                                 $Message = "Azure VM has been started: $($RoleInstance.Name)."
@@ -453,22 +489,23 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
     # We still might need to scale up
     else
     {
-        $Message = "Current number of running session hosts ($NumberOfRunningHost) is at least the minimum requirements for peak hours ($PeakMinimumNumberOfRDSH)"
+        $Message = "HOSTS: Current number of running session hosts ($NumberOfRunningHost) is at least the minimum requirements for peak hours ($PeakMinimumNumberOfRDSH)"
         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
         # Check if the available capacity meets the number of sessions or not
-        $Message = "Current total number of user sessions: $($HostPoolUserSessions.Count), available session capacity is: $AvailableSessionCapacity"
+        $Message = "SESSIONS: Current total number of user sessions: $($HostPoolUserSessions.Count), available session capacity is: $AvailableSessionCapacity"
         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
         # If we need to scale up
         if ($HostPoolUserSessions.Count -ge $AvailableSessionCapacity) {
-            $Message = "Current available session capacity is less than demanded user sessions, starting session host"
+            $Message = "Current available session capacity is less than demanded user sessions, starting session host and disabling rampdown"
             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+            $Rampdown = $False
 
             # Running out of capacity, we need to start more VMs if there are any 
             foreach ($SessionHost in $AllSessionHosts.SessionHostName) {
                 if ($HostPoolUserSessions.Count -ge $AvailableSessionCapacity) {
                     $VMName = $SessionHost.Split(".")[0]
-                    $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
-                    if ($SessionHost.ToLower().Contains($RoleInstance.Name.ToLower())) {
+                    $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
+                    if ($SessionHost.ToLower().Contains($RoleInstance.Name.ToLower()) -and !($Dryrun)) {
                         # Check if the Azure VM is running and if the session host is healthy
                         $SessionHostInfo = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHost
                         if ($RoleInstance.PowerState -ne "VM running" -and $SessionHostInfo.UpdateState -eq "Succeeded") {
@@ -481,7 +518,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                             # Wait for the VM to Start
                             $IsVMStarted = $false
                             while (!$IsVMStarted) {
-                                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name -eq $VMName }
+                                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
                                 if ($RoleInstance.PowerState -eq "VM running") {
                                     $IsVMStarted = $true
                                     $Message = "Azure VM has been Started: $($RoleInstance.Name)."
@@ -516,8 +553,69 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
         }
     }
+    ##############################################
+    #           Peak hours - Rampdown            #
+    ##############################################
+    $RampdownFinished = $False
+    if ($Rampdown -and ($CurrentDateTime -ge $BeginRampdownDateTime )) {
+        $Message = "Starting ramping down during peak time, and trying to bring hosts down to $MinimumNumberOfRDSH out of the current $($ListOfSessionHosts.Count), one at a time"
+        Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+        # Only if there are more running hosts than the target for offpeak
+        if ($NumberOfRunningHost -gt $MinimumNumberOfRDSH) {
+            foreach ($SessionHost in $ListOfSessionHosts) {
+                $SessionHostName = $SessionHost.SessionHostName
+                $VMName = $SessionHostName.Split(".")[0]
+                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
+                $Message = "Ramp down: Checking session host $SessionHostName, VM name $VMName, VM status $($RoleInstance.PowerState)"
+                Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                # Only focus on hosts that are running
+                if ($RoleInstance.PowerState -eq "VM running" -and !$RampdownFinished -and !$Dryrun) {
+                    # If we already have a VM with no sessions, easy target
+                    if ($HostPoolUserSessions.Count -eq 0 -and $RoleInstance.Tags.Keys -contains $MaintenanceTagName) {
+                        # Shut down VM
+                        $Message = "Session host $SessionHost has no active sessions, shutting down VM $VMName"
+                        Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                        Stop-SessionHost -VMName $VMName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey -TimeDifference $TimeDifference
+                        # Dont do anything else, shutting down one is enough
+                        $RampdownFinished = $True
+                    } elseif ($HostPoolUserSessions.Count -le $RampdownUsersPerHost) {
+                        # Inform users that they need to disconnect
+                        $Message = "Session host $SessionHost has $RampdownUsersPerHost connections or less, notifying users to disconnect and putting it in drain mode"
+                        Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                        # Set the session host to drain mode (do not accept new connections, so hopefully in the next round the host will be empty)
+                        try {
+                            Set-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHostName -AllowNewSession $false -ErrorAction Stop
+                        }
+                        catch {
+                            $Message = "Unable to set it to allow connections on session host: $SessionHostName with error: $($_.exception.message)"
+                            Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                            exit
+                        }
+                        foreach ($session in $HostPoolUserSessions) {
+                            if ($session.SessionHostName -eq $SessionHostName -and $session.SessionState -eq "Active") {
+                                # Send notification
+                                try {
+                                    $Message = "This host is going to be shutdown, please log off and reconnect again to connect to a different host"
+                                    Send-RdsUserSessionMessage -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHostName -SessionId $session.SessionId -MessageTitle $LogOffMessageTitle -MessageBody "$($Message)." -NoUserPrompt -ErrorAction Stop
+                                }
+                                catch {
+                                    $Message = "Failed to send message to user with error: $($_.exception.message)"
+                                    Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                                    exit
+                                }
+                                $Message = "Script was sent a log off message to user: $($Session.UserPrincipalName | Out-String)"
+                                Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                            }
+                            # Dont do anything else, draining one session host per round is enough
+                            $RampdownFinished = $True
+                        }
+                    }
+                }
+            }    
+        }
+    }
 }
-# Note there is no scale down during peak hours
+# Note there is no scale down during peak hours outside of the rampdown phase
 else
 {
     ##############################################
@@ -555,9 +653,9 @@ else
         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
         foreach ($SessionHostName in $ListOfSessionHosts.SessionHostName) {
             # Loop through the VMs until we reach the minimum number of hosts
-            if ($NumberOfRunningHost -lt $MinimumNumberOfRDSH) {
+            if ($NumberOfRunningHost -lt $MinimumNumberOfRDSH -and !$Dryrun) {
                 $VMName = $SessionHostName.Split(".")[0]
-                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
+                $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
                 # Check the session host is in maintenance
                 if ($RoleInstance.Tags.Keys -contains $MaintenanceTagName) {
                     continue
@@ -568,7 +666,7 @@ else
                 # Wait for the VM to Start
                 $IsVMStarted = $false
                 while (!$IsVMStarted) {
-                    $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name -eq $VMName }
+                    $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
                     if ($RoleInstance.PowerState -eq "VM running") {
                         $IsVMStarted = $true
                     }
@@ -599,7 +697,7 @@ else
     foreach ($SessionHost in $ListOfSessionHosts) {
         $SessionHostName = $SessionHost.SessionHostName
         $VMName = $SessionHostName.Split(".")[0]
-        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.Contains($VMName) }
+        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
         # Check the session host is in maintenance
         if ($RoleInstance.Tags.Keys -contains $MaintenanceTagName) {
             $Message = "Session host is in maintenance: $VMName, so the script will skip this VM"
@@ -607,7 +705,7 @@ else
             $SkipSessionhosts += $SessionHost
             continue
         } else {
-            $Message = "Checking session host $SessionHost on VM $VMName..."
+            $Message = "Checking session host $($SessionHost.SessionHostName) on VM $VMName..."
             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey    
         }
 
@@ -663,7 +761,7 @@ else
             # Only handle unresponsive hosts
             if ($SessionHost.Status -ne "NoHeartbeat" -or $SessionHost.Status -ne "Unavailable") {
                 # See if we need to shut down this one to reach the target of $MinimumNumberOfRDSH
-                if ($NumberOfRunningHost -gt $MinimumNumberOfRDSH) {
+                if ($NumberOfRunningHost -gt $MinimumNumberOfRDSH -and !$Dryrun) {
                     $SessionHostName = $SessionHost.SessionHostName
                     $VMName = $SessionHostName.Split(".")[0]
                     $Message = "Trying to stop Azure VM $VMName and waiting for it to complete."
@@ -671,14 +769,14 @@ else
                     if ($SessionHost.Sessions -eq 0) {
                         $Message = "VM $VMName has no active sessions, shutting down now"
                         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
-                            Stop-SessionHost -VMName $VMName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey -TimeDifference $TimeDifference
+                        Stop-SessionHost -VMName $VMName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey -TimeDifference $TimeDifference
                     } else {
                         # Set the session host to drain mode (do not accept new connections)
                         try {
                             Set-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -Name $SessionHostName -AllowNewSession $false -ErrorAction Stop
                         }
                         catch {
-                            $Message = "Unable to set it to allow connections on session host: $SessionHostName with error: $($_.exception.message)"
+                            $Message = "Unable to clear drain mode on session host: $SessionHostName with error: $($_.exception.message)"
                             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                             exit
                         }
@@ -701,14 +799,14 @@ else
                                     # Send notification
                                     try {
                                         Send-RdsUserSessionMessage -TenantName $TenantName -HostPoolName $HostpoolName -SessionHostName $SessionHostName -SessionId $session.SessionId -MessageTitle $LogOffMessageTitle -MessageBody "$($LogOffMessageBody) You will be logged off in $($LimitSecondsToForceLogOffUser) seconds." -NoUserPrompt -ErrorAction Stop
+                                        $Message = "A log off message was sent to user: $($Session.UserPrincipalName | Out-String)"
+                                        Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                                     }
                                     catch {
                                         $Message = "Failed to send message to user with error: $($_.exception.message)"
                                         Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                                         exit
                                     }
-                                    $Message = "Script was sent a log off message to user: $($Session.UserPrincipalName | Out-String)"
-                                    Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                                 }
                             }
                             $ExistingSession = $ExistingSession + 1
@@ -758,7 +856,7 @@ else
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                     while ((!$IsVMStopped) -and ($WaitCycle -lt $StartStopMaxCycles)) {
                         $WaitCycle += 1
-                        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name -eq $VMName }
+                        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
                         if ($RoleInstance.PowerState -eq "VM deallocated") {
                             $IsVMStopped = $true
                             $Message = "Azure VM has been stopped: $($RoleInstance.Name)."
@@ -773,7 +871,7 @@ else
                     }
 
                     # Wait until the session host status is Unavailable, and remove it from drain mode
-                    $Message = "Waiting for session host $SessionHostName to become unavailable to remove it from drain mode"
+                    $Message = "Waiting for session host $SessionHostName to become available, so that it can be removed from drain mode"
                     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
                     $IsSessionHostNoHeartbeat = $false
                     $WaitCycle=0
@@ -849,7 +947,7 @@ else
         $SessionsScaleFactor = $TotalAllowSessionsInOffPeak * 0.90
         $ScaleFactor = [math]::Floor($SessionsScaleFactor)
         # Scaling up if required
-        if ($HostpoolSessionCount -ge $ScaleFactor) {
+        if ($HostpoolSessionCount -ge $ScaleFactor -and !$(Dryrun)) {
             $Message = "Scaling up the farm to accomodate for the high session count"
             Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
             $AllSessionHosts = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName | Where-Object { $_.Status -eq "NoHeartbeat" -or $_.Status -eq "Unavailable" }
@@ -870,7 +968,7 @@ else
                     # Wait for the VM to start
                     $IsVMStarted = $false
                     while (!$IsVMStarted) {
-                        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name -eq $VMName }
+                        $RoleInstance = Get-AzVM -Status | Where-Object { $_.Name.ToLower() -eq $VMName.ToLower() }
                         if ($RoleInstance.PowerState -eq "VM running") {
                             $IsVMStarted = $true
                             $Message = "Azure VM has been Started: $($RoleInstance.Name)."

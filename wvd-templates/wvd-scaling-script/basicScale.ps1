@@ -40,6 +40,7 @@ $RDBrokerURL = $Input.RDBrokerURL
 $AutomationAccountName = $Input.AutomationAccountName
 $ConnectionAssetName = $Input.ConnectionAssetName
 $WeekDaysPeak = $Input.WeekDaysPeak  # Expected as a space-separated string, such as "1 2 3 4 5" (0=Sunday, 6=Saturday)
+$BankHolidays = $Input.BankHolidays  # Expected as a space-separated string with MM/DD, such as "5/1 12/25"
 $ScaleUpDuringOffpeak = $Input.ScaleUpDuringOffPeak  # Expected "yes" or "no"
 $BeginRampdownTime = $Input.BeginRampdownTime
 $RampdownUsersPerHost = $Input.RampdownUsersPerHost  # if connections < RampdownUsersPerHost, users are asked to logoff 
@@ -57,6 +58,11 @@ if (!$PeakMinimumNumberOfRDSH) {
 }
 $ScaleUpDuringOffpeak = ($ScaleUpDuringOffpeak -eq "yes")  # Defaults to $false
 $Dryrun = ($DryrunInput -eq "yes")  # Defaults to $false
+if (!$BankHolidays) {
+    $BankHolidaysArray = @()
+} else {
+    $BankHolidaysArray = $BankHolidays -split " "
+}
 
 # Transform the string for week days into an array
 $WeekDaysPeakArray = $WeekDaysPeak -split " "
@@ -154,7 +160,7 @@ if ($Dryrun) {
 
 # Display some the control variables
 $Message = "Running with these control variables: 'MinimumNumberOfRDSH' = '$MinimumNumberOfRDSH', `
-           'PeakMinimumNumberOfRDSH': '$PeakMinimumNumberOfRDSH', 'WeekDaysPeak': '$WeekDaysPeak', `
+           'PeakMinimumNumberOfRDSH': '$PeakMinimumNumberOfRDSH', 'WeekDaysPeak': '$WeekDaysPeak', 'BankHolidays': '$BankHolidays', `
            'ScaleUpDuringOffpeak': '$ScaleUpDuringOffpeak' 'SessionThresholdPerCPU': '$SessionThresholdPerCPU'"
 Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
 
@@ -357,14 +363,32 @@ $HostpoolInfo = Get-RdsHostPool -TenantName $TenantName -Name $HostPoolName
 # Check if the hostpool have session hosts
 $ListOfSessionHosts = Get-RdsSessionHost -TenantName $TenantName -HostPoolName $HostpoolName -ErrorAction Stop | Sort-Object SessionHostName
 if (!$ListOfSessionHosts) {
-    $Message = "Session hosts does not exist in the Hostpool of '$HostpoolName'. Ensure that hostpool have hosts or not?."
+    $Message = "Session hosts does not exist in the Hostpool of '$HostpoolName'. Ensure that the hostpool has at least one session host"
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
     exit
 }
 
-# Check if it is during the peak or off-peak time
+# Check whether today is a bank holiday
+$TodayIsBankHoliday = $false
+foreach ($BankHoliday in $BankHolidaysArray) {
+    $BankHolidayDetails = $BankHoliday.ToString() -split "/"
+    if ($BankHolidayDetails.Length -eq 2)
+    {
+        $BankHolidayDay = $BankHolidayDetails[1].ToString()
+        $BankHolidayMonth = $BankHolidayDetails[0].ToString()
+        if (($CurrentDateTime.Day.ToString() -eq $BankHolidayDay) -and ($CurrentDateTime.Month.ToString() -eq $BankHolidayMonth)) {
+                $Message = "Today appears to be a bank holiday"
+                Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                $TodayIsBankHoliday = $true
+        }    
+    } else {
+        $Message = "The date $BankHoliday seems to be malformed. It should be in the format MM/DD"
+        Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+    }
+}
 
-if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDateTime -and $WeekDaysPeakArray.Contains($CurrentDayOfWeek)) {
+# Check if it is during the peak or off-peak time
+if (($CurrentDateTime -ge $BeginPeakDateTime) -and ($CurrentDateTime -le $EndPeakDateTime) -and ($WeekDaysPeakArray.Contains($CurrentDayOfWeek)) -and (-not $TodayIsBankHoliday)) {
     ##############################################
     #                Peak hours                 #
     ##############################################
@@ -428,7 +452,7 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
         }
     }
 
-    $Message = "Current number of running hosts: $NumberOfRunningHost. Total number of running cores: $($TotalRunningCores.ToString())"
+    $Message = "Current number of running hosts: $NumberOfRunningHost. Total number of running cores: $($TotalRunningCores.ToString()). Available session capacity: $($AvailableSessionCapacity.ToString())"
     Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
 
     # PeakMinimumNuberOfRDSH was set and we need more hosts
@@ -477,9 +501,6 @@ if ($CurrentDateTime -ge $BeginPeakDateTime -and $CurrentDateTime -le $EndPeakDa
                         $AvailableSessionCapacity = $AvailableSessionCapacity + $RoleSize.NumberOfCores * $SessionThresholdPerCPU
                         [int]$NumberOfRunningHost = [int]$NumberOfRunningHost + 1
                         [int]$TotalRunningCores = [int]$TotalRunningCores + $RoleSize.NumberOfCores
-                        if ($NumberOfRunningHost -ge $MinimumNumberOfRDSH) {
-                            break;
-                        }
                     }
                 }
             }
@@ -725,6 +746,14 @@ else
             } else {
                 $Message = "Session host $SessionHost is powered off"
                 Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey    
+                # Disconnect stale sessions to this host here. There shouldnt be any sessions to a powered off VM
+                $ShutdownVMSessions = $(Get-RdsUserSession -TenantName $TenantName -HostpoolName $HostpoolName | Where-Object { $_.SessionHostName -eq $SessionHost.SessionHostName})
+                foreach ($session in $ShutdownVMSessions) {
+                    $Message = "Session $($session.SessionId) from user $($session.UserPrincipalName) and state $($session.SessionState) is connected to session host $($session.SessionHostName), although that VM is powered off!"
+                    Send-Message -Message $Message -HostPoolName $HostpoolName -LogAnalyticsWorkspaceId $LogAnalyticsWorkspaceId -LogAnalyticsPrimaryKey $LogAnalyticsPrimaryKey
+                    # Uncomment next line to invoke the session logoff
+                    Invoke-RdsUserSessionLogoff -TenantName $TenantName -HostPoolName $HostPoolName -SessionHostName $session.SessionHostName -SessionId $session.SessionId -Force -NoUserPrompt
+                }
             }
         }
     }
